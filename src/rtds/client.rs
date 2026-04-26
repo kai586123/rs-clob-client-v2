@@ -14,6 +14,7 @@ use crate::types::Address;
 use crate::ws::ConnectionManager;
 use crate::ws::config::Config;
 use crate::ws::connection::ConnectionState;
+use crate::ws::task::AbortOnDrop;
 
 /// RTDS (Real-Time Data Socket) client for streaming Polymarket data.
 ///
@@ -65,6 +66,10 @@ struct ClientInner<S: State> {
     connection: ConnectionManager<RtdsMessage, SimpleParser>,
     /// Subscription manager for handling subscriptions
     subscriptions: Arc<SubscriptionManager>,
+    /// Owns the reconnection handler task and aborts it on drop to release the strong
+    /// `Arc<SubscriptionManager>` clone held by that task.
+    #[expect(dead_code, reason = "Field held for its Drop side effect")]
+    reconnect_handle: AbortOnDrop,
 }
 
 impl Client<Unauthenticated> {
@@ -74,7 +79,7 @@ impl Client<Unauthenticated> {
         let subscriptions = Arc::new(SubscriptionManager::new(connection.clone()));
 
         // Start reconnection handler to re-subscribe on connection recovery
-        subscriptions.start_reconnection_handler();
+        let reconnect_handle = AbortOnDrop::new(subscriptions.start_reconnection_handler());
 
         Ok(Self {
             inner: Arc::new(ClientInner {
@@ -83,6 +88,7 @@ impl Client<Unauthenticated> {
                 endpoint: endpoint.to_owned(),
                 connection,
                 subscriptions,
+                reconnect_handle,
             }),
         })
     }
@@ -110,6 +116,7 @@ impl Client<Unauthenticated> {
                 endpoint: inner.endpoint,
                 connection: inner.connection,
                 subscriptions: inner.subscriptions,
+                reconnect_handle: inner.reconnect_handle,
             }),
         })
     }
@@ -325,6 +332,7 @@ impl Client<Authenticated<Normal>> {
                 endpoint: inner.endpoint,
                 connection: inner.connection,
                 subscriptions: inner.subscriptions,
+                reconnect_handle: inner.reconnect_handle,
             }),
         })
     }

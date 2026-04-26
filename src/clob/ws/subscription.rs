@@ -105,7 +105,11 @@ impl SubscriptionManager {
     }
 
     /// Start the reconnection handler that re-subscribes on connection recovery.
-    pub fn start_reconnection_handler(self: &Arc<Self>) {
+    ///
+    /// Returns the spawned task handle so the owner can abort it on drop. The handler holds a
+    /// strong `Arc<Self>` clone and must not be detached, otherwise it can keep the channel graph
+    /// alive after the client is dropped.
+    pub fn start_reconnection_handler(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let this = Arc::clone(self);
 
         tokio::spawn(async move {
@@ -140,7 +144,7 @@ impl SubscriptionManager {
                     }
                 }
             }
-        });
+        })
     }
 
     /// Re-send subscription requests for all tracked assets and markets.

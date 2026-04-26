@@ -20,6 +20,7 @@ use crate::types::{Address, B256, Decimal, U256};
 use crate::ws::ConnectionManager;
 use crate::ws::config::Config;
 use crate::ws::connection::ConnectionState;
+use crate::ws::task::AbortOnDrop;
 
 /// WebSocket client for real-time market data and user updates.
 ///
@@ -622,6 +623,10 @@ impl<S: State> ClientInner<S> {
 struct ChannelResources {
     connection: ConnectionManager<WsMessage, Arc<InterestTracker>>,
     subscriptions: Arc<SubscriptionManager>,
+    /// Owns the reconnection handler task and aborts it on drop to release the strong
+    /// `Arc<SubscriptionManager>` clone held by that task.
+    #[expect(dead_code, reason = "Field held for its Drop side effect")]
+    reconnect_handle: AbortOnDrop,
 }
 
 impl ChannelResources {
@@ -630,11 +635,12 @@ impl ChannelResources {
         let connection = ConnectionManager::new(endpoint, config, Arc::clone(&interest))?;
         let subscriptions = Arc::new(SubscriptionManager::new(connection.clone(), interest));
 
-        subscriptions.start_reconnection_handler();
+        let reconnect_handle = AbortOnDrop::new(subscriptions.start_reconnection_handler());
 
         Ok(Self {
             connection,
             subscriptions,
+            reconnect_handle,
         })
     }
 
