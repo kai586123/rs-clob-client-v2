@@ -12,6 +12,7 @@ const DEFAULT_HEARTBEAT_TIMEOUT_DURATION: Duration = Duration::from_secs(15);
 const DEFAULT_INITIAL_BACKOFF_DURATION: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_BACKOFF_DURATION: Duration = Duration::from_secs(60);
 const DEFAULT_BACKOFF_MULTIPLIER: f64 = 2.0;
+const DEFAULT_BROADCAST_CAPACITY: usize = 1024;
 
 /// Configuration for WebSocket client behavior.
 #[non_exhaustive]
@@ -23,6 +24,10 @@ pub struct Config {
     pub heartbeat_timeout: Duration,
     /// Reconnection strategy configuration
     pub reconnect: ReconnectConfig,
+    /// Capacity of the internal broadcast channel for incoming WebSocket events.
+    ///
+    /// Larger values give slow consumers more headroom at the cost of memory.
+    pub broadcast_capacity: usize,
 }
 
 impl Default for Config {
@@ -31,6 +36,7 @@ impl Default for Config {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL_DURATION,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT_DURATION,
             reconnect: ReconnectConfig::default(),
+            broadcast_capacity: DEFAULT_BROADCAST_CAPACITY,
         }
     }
 }
@@ -112,5 +118,11 @@ mod tests {
     fn default_heartbeat_is_five_seconds() {
         let config = Config::default();
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn default_broadcast_capacity_is_1024() {
+        let config = Config::default();
+        assert_eq!(config.broadcast_capacity, 1024);
     }
 }

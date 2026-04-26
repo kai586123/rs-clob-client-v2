@@ -26,8 +26,8 @@ use crate::{Result, error::Error};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Broadcast channel capacity for incoming messages.
-const BROADCAST_CAPACITY: usize = 1024;
+/// Outgoing subscription/control messages buffered while the connection task is busy.
+const OUTGOING_CAPACITY: usize = 64;
 
 /// Connection state tracking.
 #[non_exhaustive]
@@ -97,7 +97,7 @@ where
     /// Watch channel receiver for state changes (for use in checking the current state)
     state_rx: watch::Receiver<ConnectionState>,
     /// Sender channel for outgoing messages
-    sender_tx: mpsc::UnboundedSender<String>,
+    sender_tx: mpsc::Sender<String>,
     /// Broadcast sender for incoming messages
     broadcast_tx: broadcast::Sender<M>,
     /// Phantom data for unused type parameters
@@ -115,8 +115,8 @@ where
     /// The connection loop runs in a background task and automatically
     /// handles reconnection according to the config's `ReconnectConfig`.
     pub fn new(endpoint: String, config: Config, parser: P) -> Result<Self> {
-        let (sender_tx, sender_rx) = mpsc::unbounded_channel();
-        let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (sender_tx, sender_rx) = mpsc::channel(OUTGOING_CAPACITY);
+        let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity.max(1));
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
 
         // Spawn connection task
@@ -150,7 +150,7 @@ where
     async fn connection_loop(
         endpoint: String,
         config: Config,
-        mut sender_rx: mpsc::UnboundedReceiver<String>,
+        mut sender_rx: mpsc::Receiver<String>,
         broadcast_tx: broadcast::Sender<M>,
         parser: P,
         state_tx: watch::Sender<ConnectionState>,
@@ -227,7 +227,7 @@ where
     /// Handle an active WebSocket connection.
     async fn handle_connection(
         ws_stream: WsStream,
-        sender_rx: &mut mpsc::UnboundedReceiver<String>,
+        sender_rx: &mut mpsc::Receiver<String>,
         broadcast_tx: &broadcast::Sender<M>,
         state_rx: watch::Receiver<ConnectionState>,
         config: Config,
@@ -237,7 +237,7 @@ where
 
         // Channel to notify heartbeat loop when PONG is received
         let (pong_tx, pong_rx) = watch::channel(Instant::now());
-        let (ping_tx, mut ping_rx) = mpsc::unbounded_channel();
+        let (ping_tx, mut ping_rx) = mpsc::channel(1);
 
         let heartbeat_handle = tokio::spawn(async move {
             Self::heartbeat_loop(ping_tx, state_rx, &config, pong_rx).await;
@@ -321,7 +321,7 @@ where
 
     /// Heartbeat loop that sends PING messages and monitors PONG responses.
     async fn heartbeat_loop(
-        ping_tx: mpsc::UnboundedSender<()>,
+        ping_tx: mpsc::Sender<()>,
         state_rx: watch::Receiver<ConnectionState>,
         config: &Config,
         mut pong_rx: watch::Receiver<Instant>,
@@ -342,7 +342,7 @@ where
 
             // Send PING request to message loop
             let ping_sent = Instant::now();
-            if ping_tx.send(()).is_err() {
+            if ping_tx.send(()).await.is_err() {
                 // Message loop has terminated
                 break;
             }
@@ -382,7 +382,7 @@ where
     pub fn send<R: Serialize>(&self, request: &R) -> Result<()> {
         let json = serde_json::to_string(request)?;
         self.sender_tx
-            .send(json)
+            .try_send(json)
             .map_err(|_e| WsError::ConnectionClosed)?;
         Ok(())
     }
@@ -395,7 +395,7 @@ where
     ) -> Result<()> {
         let json = request.as_authenticated(credentials)?;
         self.sender_tx
-            .send(json)
+            .try_send(json)
             .map_err(|_e| WsError::ConnectionClosed)?;
         Ok(())
     }
