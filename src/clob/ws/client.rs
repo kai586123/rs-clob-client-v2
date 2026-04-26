@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_stream::try_stream;
 use dashmap::mapref::one::{Ref, RefMut};
@@ -611,7 +612,13 @@ impl<S: State> ClientInner<S> {
                 if let Entry::Occupied(entry) = self.channels.entry(channel_type)
                     && !entry.get().subscriptions.has_subscriptions(channel_type)
                 {
-                    entry.remove();
+                    let (_, resources) = entry.remove();
+                    tokio::spawn(async move {
+                        // `send()` enqueues unsubscribe on the connection writer. Keep the
+                        // channel alive briefly so the writer can flush before Drop cancels it.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        drop(resources);
+                    });
                 }
                 Ok(())
             }
