@@ -8,7 +8,6 @@ use tracing::warn;
 use crate::auth::ApiKey;
 use crate::clob::types::{OrderStatusType, Side, TraderSide};
 use crate::clob::ws::interest::MessageInterest;
-use crate::error::Kind;
 use crate::types::{B256, Decimal, U256};
 
 /// Top-level WebSocket message wrapper.
@@ -496,9 +495,19 @@ pub fn parse_if_interested(
     bytes: &[u8],
     interest: &MessageInterest,
 ) -> crate::Result<Vec<WsMessage>> {
-    // Parse JSON once into Value
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|err| crate::error::Error::with_source(Kind::Internal, Box::new(err)))?;
+    // Parse JSON once into Value. The server can send plain-text control messages such as
+    // "INVALID MARKETS"; those are not market events and should be ignored.
+    let value: Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                text = %String::from_utf8_lossy(bytes),
+                "Ignoring non-JSON WebSocket message"
+            );
+            return Ok(vec![]);
+        }
+    };
 
     match &value {
         Value::Object(map) => {
@@ -1062,6 +1071,12 @@ mod tests {
         assert!(msgs.is_empty());
 
         let msgs = parse_if_interested(b"true", &MessageInterest::ALL).unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn parse_if_interested_returns_empty_for_non_json_control_message() {
+        let msgs = parse_if_interested(b"INVALID MARKETS", &MessageInterest::ALL).unwrap();
         assert!(msgs.is_empty());
     }
 

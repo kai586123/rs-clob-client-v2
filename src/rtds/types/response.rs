@@ -156,23 +156,44 @@ pub enum CommentType {
 ///
 /// Handles both single objects and arrays of messages.
 /// Returns an empty vector for empty or whitespace-only input.
+///
+/// Control and error messages that lack a `topic` field are skipped.
 pub fn parse_messages(bytes: &[u8]) -> crate::Result<Vec<RtdsMessage>> {
-    // Handle empty or whitespace-only input (server keepalive messages)
-    let trimmed = bytes
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .map_or(&[][..], |start| &bytes[start..]);
+    let value: Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                text = %String::from_utf8_lossy(bytes),
+                "Ignoring non-JSON RTDS WebSocket message"
+            );
+            return Ok(vec![]);
+        }
+    };
 
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
+    match value {
+        Value::Object(ref map) => {
+            if !map.contains_key("topic") {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(?map, "Skipping RTDS message without topic field");
+                return Ok(vec![]);
+            }
 
-    // Try parsing as array first, fall back to single object
-    if trimmed.first() == Some(&b'[') {
-        Ok(serde_json::from_slice(trimmed)?)
-    } else {
-        let msg: RtdsMessage = serde_json::from_slice(trimmed)?;
-        Ok(vec![msg])
+            let msg: RtdsMessage = serde_json::from_value(value)?;
+            Ok(vec![msg])
+        }
+        Value::Array(arr) => Ok(arr
+            .into_iter()
+            .filter_map(|elem| {
+                let obj = elem.as_object()?;
+                if !obj.contains_key("topic") {
+                    return None;
+                }
+
+                serde_json::from_value(elem).ok()
+            })
+            .collect()),
+        _ => Ok(vec![]),
     }
 }
 
@@ -298,6 +319,32 @@ mod tests {
     #[test]
     fn parse_whitespace_only_input() {
         let msgs = parse_messages(b"   \n\t  ").unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn parse_error_control_message_returns_empty() {
+        let json =
+            r#"{"message": "Invalid request body", "connectionId": "abc", "requestId": "def"}"#;
+        let msgs = parse_messages(json.as_bytes()).unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn parse_non_json_input_returns_empty() {
+        let msgs = parse_messages(b"not json at all").unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn parse_primitive_json_returns_empty() {
+        let msgs = parse_messages(b"null").unwrap();
+        assert!(msgs.is_empty());
+
+        let msgs = parse_messages(b"42").unwrap();
+        assert!(msgs.is_empty());
+
+        let msgs = parse_messages(b"true").unwrap();
         assert!(msgs.is_empty());
     }
 }
