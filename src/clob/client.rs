@@ -204,7 +204,11 @@ impl<S: Signer, K: Kind> AuthenticationBuilder<'_, S, K> {
             Some(credentials) => credentials,
             None => {
                 inner
-                    .create_or_derive_api_key(self.signer, self.nonce)
+                    .create_or_derive_api_key(
+                        self.signer,
+                        self.nonce,
+                        self.signature_type.unwrap_or(SignatureType::Eoa),
+                    )
                     .await?
             }
         };
@@ -483,7 +487,17 @@ impl ClientInner<Unauthenticated> {
         &self,
         signer: &S,
         nonce: Option<u32>,
+        signature_type: SignatureType,
     ) -> Result<Credentials> {
+        // Proxy and GnosisSafe wallets cannot create API keys directly. Skip straight to derive to
+        // avoid an expected 400 response before authentication succeeds.
+        if matches!(
+            signature_type,
+            SignatureType::Proxy | SignatureType::GnosisSafe
+        ) {
+            return self.derive_api_key(signer, nonce).await;
+        }
+
         match self.create_api_key(signer, nonce).await {
             Ok(creds) => Ok(creds),
             Err(err) if err.kind() == ErrorKind::Status => {
@@ -1537,7 +1551,9 @@ impl Client<Unauthenticated> {
         signer: &S,
         nonce: Option<u32>,
     ) -> Result<Credentials> {
-        self.inner.create_or_derive_api_key(signer, nonce).await
+        self.inner
+            .create_or_derive_api_key(signer, nonce, SignatureType::Eoa)
+            .await
     }
 }
 

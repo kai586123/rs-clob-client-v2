@@ -9,6 +9,7 @@ use alloy::signers::local::LocalSigner;
 use httpmock::MockServer;
 use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::auth::{Credentials, ExposeSecret as _};
+use polymarket_client_sdk_v2::clob::types::SignatureType;
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::error::{Kind, Synchronization, Validation};
 use reqwest::StatusCode;
@@ -56,6 +57,39 @@ async fn authenticate_with_nonce_should_succeed() -> anyhow::Result<()> {
     assert_eq!(signer.address(), client.address());
 
     mock.assert();
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn authenticate_with_proxy_signature_should_skip_create_api_key() -> anyhow::Result<()> {
+    let server = MockServer::start();
+    let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+
+    let create_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/auth/api-key");
+        then.status(StatusCode::INTERNAL_SERVER_ERROR);
+    });
+    let derive_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/auth/derive-api-key")
+            .header(POLY_ADDRESS, signer.address().to_string().to_lowercase());
+        then.status(StatusCode::OK).json_body(json!({
+            "apiKey": API_KEY,
+            "passphrase": PASSPHRASE,
+            "secret": SECRET
+        }));
+    });
+
+    let client = Client::new(&server.base_url(), Config::default())?
+        .authentication_builder(&signer)
+        .signature_type(SignatureType::Proxy)
+        .authenticate()
+        .await?;
+
+    assert_eq!(signer.address(), client.address());
+    create_mock.assert_hits(0);
+    derive_mock.assert();
 
     Ok(())
 }
