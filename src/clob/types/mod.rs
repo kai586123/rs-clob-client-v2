@@ -419,7 +419,11 @@ impl<'de> Deserialize<'de> for TickSize {
     where
         D: Deserializer<'de>,
     {
-        let dec = <Decimal as Deserialize>::deserialize(deserializer)?;
+        use serde_with::DeserializeAs;
+
+        let dec = <crate::serde_helpers::DecimalFromAny as DeserializeAs<Decimal>>::deserialize_as(
+            deserializer,
+        )?;
         TickSize::try_from(dec).map_err(de::Error::custom)
     }
 }
