@@ -1441,8 +1441,6 @@ mod authenticated {
         AssetType, OrderStatusType, OrderType, Side, SignableOrder, TickSize, TradeStatusType,
         TraderSide,
     };
-    #[cfg(feature = "heartbeats")]
-    use polymarket_client_sdk_v2::error::Synchronization;
     use polymarket_client_sdk_v2::types::{Address, address, b256};
 
     use super::*;
@@ -2894,8 +2892,7 @@ mod authenticated {
 
     #[cfg(feature = "heartbeats")]
     #[tokio::test]
-    async fn stop_heartbeats_from_two_clones_should_fail_and_then_succeed_on_drop()
-    -> anyhow::Result<()> {
+    async fn stop_heartbeats_from_clone_should_stop_shared_task() -> anyhow::Result<()> {
         let server = MockServer::start();
 
         let id = Uuid::new_v4();
@@ -2916,31 +2913,24 @@ mod authenticated {
         });
 
         let mut client = create_authenticated(&server).await?;
-        assert!(client.heartbeats_active());
+        assert!(client.heartbeats_active().await);
 
         // Give the first client time to get set up
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let client_clone = client.clone();
-        assert!(client_clone.heartbeats_active());
+        let mut client_clone = client.clone();
+        assert!(client_clone.heartbeats_active().await);
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let err = client.stop_heartbeats().await.unwrap_err();
-        err.downcast_ref::<Synchronization>().unwrap();
+        client_clone.stop_heartbeats().await?;
 
-        // Retain the heartbeat cancel token and channel on initial error
-        assert!(client.heartbeats_active());
-        assert!(client_clone.heartbeats_active());
+        assert!(!client.heartbeats_active().await);
+        assert!(!client_clone.heartbeats_active().await);
 
-        drop(client_clone);
-
-        assert!(client.heartbeats_active());
-
-        // After dropping the offending client, we should be able to stop heartbeats successfully
+        // Stopping from another clone is idempotent after the shared task has terminated.
         client.stop_heartbeats().await?;
-
-        assert!(!client.heartbeats_active());
+        assert!(!client.heartbeats_active().await);
 
         Ok(())
     }

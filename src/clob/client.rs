@@ -23,7 +23,11 @@ use tracing::{debug, error};
 use url::Url;
 use uuid::Uuid;
 #[cfg(feature = "heartbeats")]
-use {tokio::sync::oneshot::Receiver, tokio::time, tokio_util::sync::CancellationToken};
+use {
+    tokio::sync::{Mutex, oneshot::Receiver},
+    tokio::time,
+    tokio_util::sync::CancellationToken,
+};
 
 use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Kind, Normal};
@@ -235,13 +239,13 @@ impl<S: Signer, K: Kind> AuthenticationBuilder<'_, S, K> {
                 funder,
                 signature_type: self.signature_type.unwrap_or(SignatureType::Eoa),
                 salt_generator: self.salt_generator.unwrap_or(generate_seed),
+                #[cfg(feature = "heartbeats")]
+                heartbeat_token: Mutex::new(DroppingCancellationToken(None)),
             }),
-            #[cfg(feature = "heartbeats")]
-            heartbeat_token: DroppingCancellationToken(None),
         };
 
         #[cfg(feature = "heartbeats")]
-        Client::<Authenticated<K>>::start_heartbeats(&mut client)?;
+        Client::<Authenticated<K>>::start_heartbeats(&mut client).await?;
 
         Ok(client)
     }
@@ -303,10 +307,6 @@ impl<S: Signer, K: Kind> AuthenticationBuilder<'_, S, K> {
 #[derive(Clone, Debug)]
 pub struct Client<S: State = Unauthenticated> {
     inner: Arc<ClientInner<S>>,
-    #[cfg(feature = "heartbeats")]
-    /// When the `heartbeats` feature is enabled, the authenticated [`Client`] will automatically
-    /// send heartbeats at the default cadence. See [`Config`] for more details.
-    heartbeat_token: DroppingCancellationToken,
 }
 
 #[cfg(feature = "heartbeats")]
@@ -319,7 +319,7 @@ pub struct Client<S: State = Unauthenticated> {
 /// This way, the inner token is expressly cancelled when [`DroppingCancellationToken`] is dropped.
 /// We also have a [`Receiver<()>`] to notify when the inner [`Client`] has been dropped so that
 /// we can avoid a race condition when calling [`Arc::into_inner`] on promotion and demotion methods.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct DroppingCancellationToken(Option<(CancellationToken, Arc<Receiver<()>>)>);
 
 #[cfg(feature = "heartbeats")]
@@ -433,6 +433,10 @@ struct ClientInner<S: State> {
     signature_type: SignatureType,
     /// The salt/seed generator for use in creating [`SignableOrder`]s
     salt_generator: fn() -> u64,
+    #[cfg(feature = "heartbeats")]
+    /// When the `heartbeats` feature is enabled, the authenticated [`Client`] will automatically
+    /// send heartbeats at the default cadence. See [`Config`] for more details.
+    heartbeat_token: Mutex<DroppingCancellationToken>,
 }
 
 impl<S: State> ClientInner<S> {
@@ -1455,9 +1459,9 @@ impl Client<Unauthenticated> {
                 funder: None,
                 signature_type: SignatureType::Eoa,
                 salt_generator: generate_seed,
+                #[cfg(feature = "heartbeats")]
+                heartbeat_token: Mutex::new(DroppingCancellationToken(None)),
             }),
-            #[cfg(feature = "heartbeats")]
-            heartbeat_token: DroppingCancellationToken(None),
         })
     }
 
@@ -1543,13 +1547,17 @@ impl<K: Kind> Client<Authenticated<K>> {
         not(feature = "heartbeats"),
         expect(
             clippy::unused_async,
-            unused_mut,
-            reason = "Nothing to await or modify when heartbeats are disabled"
+            reason = "Nothing to await when heartbeats are disabled"
         )
     )]
-    pub async fn deauthenticate(mut self) -> Result<Client<Unauthenticated>> {
+    pub async fn deauthenticate(self) -> Result<Client<Unauthenticated>> {
         #[cfg(feature = "heartbeats")]
-        self.heartbeat_token.cancel_and_wait().await?;
+        self.inner
+            .heartbeat_token
+            .lock()
+            .await
+            .cancel_and_wait()
+            .await?;
 
         let inner = Arc::into_inner(self.inner).ok_or(Synchronization)?;
 
@@ -1571,9 +1579,9 @@ impl<K: Kind> Client<Authenticated<K>> {
                 funder: None,
                 signature_type: SignatureType::Eoa,
                 salt_generator: generate_seed,
+                #[cfg(feature = "heartbeats")]
+                heartbeat_token: Mutex::new(DroppingCancellationToken(None)),
             }),
-            #[cfg(feature = "heartbeats")]
-            heartbeat_token: DroppingCancellationToken(None),
         })
     }
 
@@ -2492,8 +2500,8 @@ impl<K: Kind> Client<Authenticated<K>> {
     /// Returns `true` if the heartbeat background task is running, `false` otherwise.
     /// Requires the `heartbeats` feature to be enabled.
     #[must_use]
-    pub fn heartbeats_active(&self) -> bool {
-        self.heartbeat_token.0.is_some()
+    pub async fn heartbeats_active(&self) -> bool {
+        self.inner.heartbeat_token.lock().await.0.is_some()
     }
 
     #[cfg(feature = "heartbeats")]
@@ -2510,8 +2518,9 @@ impl<K: Kind> Client<Authenticated<K>> {
     /// # Note
     ///
     /// Requires the `heartbeats` feature to be enabled.
-    pub fn start_heartbeats(client: &mut Client<Authenticated<K>>) -> Result<()> {
-        if client.heartbeats_active() {
+    pub async fn start_heartbeats(client: &mut Client<Authenticated<K>>) -> Result<()> {
+        let mut heartbeat_token = client.inner.heartbeat_token.lock().await;
+        if heartbeat_token.0.is_some() {
             return Err(Error::validation("Unable to create another heartbeat task"));
         }
 
@@ -2553,10 +2562,11 @@ impl<K: Kind> Client<Authenticated<K>> {
                 }
             }
 
-            tx.send(())
+            drop(client_clone);
+            let _ = tx.send(());
         });
 
-        client.heartbeat_token = DroppingCancellationToken(Some((token, Arc::new(rx))));
+        *heartbeat_token = DroppingCancellationToken(Some((token, Arc::new(rx))));
 
         Ok(())
     }
@@ -2575,7 +2585,12 @@ impl<K: Kind> Client<Authenticated<K>> {
     ///
     /// Requires the `heartbeats` feature to be enabled.
     pub async fn stop_heartbeats(&mut self) -> Result<()> {
-        self.heartbeat_token.cancel_and_wait().await
+        self.inner
+            .heartbeat_token
+            .lock()
+            .await
+            .cancel_and_wait()
+            .await
     }
 
     async fn create_headers(&self, request: &Request) -> Result<HeaderMap> {
@@ -2813,8 +2828,6 @@ impl<K: Kind> Client<Authenticated<K>> {
             fee_rate_bps: None,
             client: Client {
                 inner: Arc::clone(&self.inner),
-                #[cfg(feature = "heartbeats")]
-                heartbeat_token: self.heartbeat_token.clone(),
             },
             _kind: PhantomData,
         }
