@@ -1196,6 +1196,14 @@ mod types {
         assert_eq!(ActivityType::Redeem.to_string(), "REDEEM");
         assert_eq!(ActivityType::Reward.to_string(), "REWARD");
         assert_eq!(ActivityType::Conversion.to_string(), "CONVERSION");
+        assert_eq!(ActivityType::MakerRebate.to_string(), "MAKER_REBATE");
+    }
+
+    #[test]
+    fn maker_rebate_activity_type_deserializes() {
+        let activity_type: ActivityType =
+            serde_json::from_value(serde_json::json!("MAKER_REBATE")).unwrap();
+        assert_eq!(activity_type, ActivityType::MakerRebate);
     }
 
     #[test]
