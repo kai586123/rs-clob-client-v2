@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-#[cfg(feature = "heartbeats")]
 use std::time::Duration;
 
 use alloy::dyn_abi::Eip712Domain;
@@ -383,6 +382,12 @@ pub struct Config {
     /// Default builder code inherited by orders built via [`Client::limit_order`] or
     /// [`Client::market_order`] when not set on the order itself.
     builder_code: Option<B256>,
+    /// A pre-configured [`reqwest::Client`] to use for CLOB HTTP requests. When provided, the
+    /// supplied client is used as-is; callers should include appropriate default headers such as
+    /// `User-Agent` and `Content-Type: application/json`.
+    ///
+    /// If `None`, the client builds a standard tuned [`reqwest::Client`] internally.
+    http_client: Option<ReqwestClient>,
     #[cfg(feature = "heartbeats")]
     #[builder(default = Duration::from_secs(5))]
     /// How often the [`Client`] will automatically submit heartbeats. The default is five (5) seconds.
@@ -395,6 +400,7 @@ impl Default for Config {
             use_server_time: false,
             geoblock_host: None,
             builder_code: None,
+            http_client: None,
             #[cfg(feature = "heartbeats")]
             heartbeat_interval: Duration::from_secs(5),
         }
@@ -1447,7 +1453,19 @@ impl Client<Unauthenticated> {
         headers.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
-        let client = ReqwestClient::builder().default_headers(headers).build()?;
+        let client = match config.http_client.clone() {
+            Some(custom) => custom,
+            None => ReqwestClient::builder()
+                .default_headers(headers)
+                .tcp_nodelay(true)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .tcp_keepalive(Duration::from_secs(30))
+                .http2_keep_alive_interval(Duration::from_secs(10))
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .http2_adaptive_window(true)
+                .connect_timeout(Duration::from_secs(5))
+                .build()?,
+        };
 
         let geoblock_host = Url::parse(
             config

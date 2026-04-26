@@ -45,7 +45,7 @@ mod unauthenticated {
     use polymarket_client_sdk_v2::clob::types::{Interval, Side, TickSize, TimeRange};
     use polymarket_client_sdk_v2::error::Status;
     use polymarket_client_sdk_v2::types::address;
-    use reqwest::Method;
+    use reqwest::{Client as ReqwestClient, Method};
 
     use super::*;
 
@@ -56,6 +56,33 @@ mod unauthenticated {
 
         let mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/");
+            then.status(StatusCode::OK).body("\"OK\"");
+        });
+
+        let response = client.ok().await?;
+
+        assert_eq!(response, "OK");
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_http_client_should_be_used() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "X-Custom-Client",
+            reqwest::header::HeaderValue::from_static("yes"),
+        );
+        let http_client = ReqwestClient::builder().default_headers(headers).build()?;
+        let config = Config::builder().http_client(http_client).build();
+        let client = Client::new(&server.base_url(), config)?;
+
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/")
+                .header("X-Custom-Client", "yes");
             then.status(StatusCode::OK).body("\"OK\"");
         });
 
