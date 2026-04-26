@@ -79,7 +79,10 @@ impl Client<Unauthenticated> {
         let subscriptions = Arc::new(SubscriptionManager::new(connection.clone()));
 
         // Start reconnection handler to re-subscribe on connection recovery
-        let reconnect_handle = AbortOnDrop::new(subscriptions.start_reconnection_handler());
+        let reconnect_handle = AbortOnDrop::with_cancel(
+            subscriptions.start_reconnection_handler(),
+            connection.cancel_token(),
+        );
 
         Ok(Self {
             inner: Arc::new(ClientInner {

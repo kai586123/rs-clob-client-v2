@@ -635,7 +635,10 @@ impl ChannelResources {
         let connection = ConnectionManager::new(endpoint, config, Arc::clone(&interest))?;
         let subscriptions = Arc::new(SubscriptionManager::new(connection.clone(), interest));
 
-        let reconnect_handle = AbortOnDrop::new(subscriptions.start_reconnection_handler());
+        let reconnect_handle = AbortOnDrop::with_cancel(
+            subscriptions.start_reconnection_handler(),
+            connection.cancel_token(),
+        );
 
         Ok(Self {
             connection,

@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 
 use super::config::Config;
 use super::error::WsError;
@@ -100,6 +101,8 @@ where
     sender_tx: mpsc::Sender<String>,
     /// Broadcast sender for incoming messages
     broadcast_tx: broadcast::Sender<M>,
+    /// Cancellation token for graceful shutdown.
+    cancel: CancellationToken,
     /// Phantom data for unused type parameters
     _phantom: PhantomData<P>,
 }
@@ -118,12 +121,14 @@ where
         let (sender_tx, sender_rx) = mpsc::channel(OUTGOING_CAPACITY);
         let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity.max(1));
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
+        let cancel = CancellationToken::new();
 
         // Spawn connection task
         let connection_config = config;
         let connection_endpoint = endpoint;
         let broadcast_tx_clone = broadcast_tx.clone();
         let state_tx_clone = state_tx.clone();
+        let cancel_clone = cancel.clone();
 
         tokio::spawn(async move {
             Self::connection_loop(
@@ -133,6 +138,7 @@ where
                 broadcast_tx_clone,
                 parser,
                 state_tx_clone,
+                cancel_clone,
             )
             .await;
         });
@@ -142,6 +148,7 @@ where
             state_rx,
             sender_tx,
             broadcast_tx,
+            cancel,
             _phantom: PhantomData,
         })
     }
@@ -154,13 +161,15 @@ where
         broadcast_tx: broadcast::Sender<M>,
         parser: P,
         state_tx: watch::Sender<ConnectionState>,
+        cancel: CancellationToken,
     ) {
         let mut attempt = 0_u32;
         let mut backoff: backoff::ExponentialBackoff = config.reconnect.clone().into();
+        const MIN_CONNECTION_LIFETIME: std::time::Duration = std::time::Duration::from_secs(5);
 
         loop {
-            // Check if ConnectionManager was dropped (all sender_tx instances gone)
-            if sender_rx.is_closed() {
+            // Check if ConnectionManager was dropped or shutdown was requested.
+            if cancel.is_cancelled() || sender_rx.is_closed() {
                 #[cfg(feature = "tracing")]
                 tracing::debug!("Sender channel closed, stopping connection loop");
                 _ = state_tx.send(ConnectionState::Disconnected);
@@ -172,12 +181,19 @@ where
             _ = state_tx.send(ConnectionState::Connecting);
 
             // Attempt connection
-            match connect_async(&endpoint).await {
+            let connect_result = tokio::select! {
+                () = cancel.cancelled() => {
+                    _ = state_tx.send(ConnectionState::Disconnected);
+                    break;
+                }
+                result = connect_async(&endpoint) => result,
+            };
+
+            match connect_result {
                 Ok((ws_stream, _)) => {
-                    attempt = 0;
-                    backoff.reset();
+                    let connected_at = Instant::now();
                     _ = state_tx.send(ConnectionState::Connected {
-                        since: Instant::now(),
+                        since: connected_at,
                     });
 
                     // Handle connection
@@ -187,6 +203,7 @@ where
                         &broadcast_tx,
                         state_rx,
                         config.clone(),
+                        cancel.clone(),
                         &parser,
                     )
                     .await
@@ -195,6 +212,18 @@ where
                         tracing::error!("Error handling connection: {e:?}");
                         #[cfg(not(feature = "tracing"))]
                         let _: &_ = &e;
+                    }
+
+                    if cancel.is_cancelled() {
+                        _ = state_tx.send(ConnectionState::Disconnected);
+                        break;
+                    }
+
+                    if connected_at.elapsed() >= MIN_CONNECTION_LIFETIME {
+                        attempt = 0;
+                        backoff.reset();
+                    } else {
+                        attempt = attempt.saturating_add(1);
                     }
                 }
                 Err(e) => {
@@ -219,7 +248,13 @@ where
             _ = state_tx.send(ConnectionState::Reconnecting { attempt });
 
             if let Some(duration) = backoff.next_backoff() {
-                sleep(duration).await;
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        _ = state_tx.send(ConnectionState::Disconnected);
+                        break;
+                    }
+                    () = sleep(duration) => {}
+                }
             }
         }
     }
@@ -231,6 +266,7 @@ where
         broadcast_tx: &broadcast::Sender<M>,
         state_rx: watch::Receiver<ConnectionState>,
         config: Config,
+        cancel: CancellationToken,
         parser: &P,
     ) -> Result<()> {
         let (mut write, mut read) = ws_stream.split();
@@ -274,6 +310,7 @@ where
                         }
                         Ok(Message::Close(_)) => {
                             heartbeat_handle.abort();
+                            let _ = write.send(Message::Close(None)).await;
                             return Err(Error::with_source(
                                 Kind::WebSocket,
                                 WsError::ConnectionClosed,
@@ -281,6 +318,7 @@ where
                         }
                         Err(e) => {
                             heartbeat_handle.abort();
+                            let _ = write.send(Message::Close(None)).await;
                             return Err(Error::with_source(
                                 Kind::WebSocket,
                                 WsError::Connection(e),
@@ -290,6 +328,11 @@ where
                             // Ignore binary frames and unsolicited PONG replies.
                         }
                     }
+                }
+
+                // Handle explicit shutdown requests.
+                () = cancel.cancelled() => {
+                    break;
                 }
 
                 // Handle outgoing messages from subscriptions
@@ -313,8 +356,9 @@ where
             }
         }
 
-        // Cleanup
+        // Cleanup: send a WebSocket close frame best-effort to avoid half-open sockets.
         heartbeat_handle.abort();
+        let _ = write.send(Message::Close(None)).await;
 
         Ok(())
     }
@@ -422,5 +466,16 @@ where
     #[must_use]
     pub fn state_receiver(&self) -> watch::Receiver<ConnectionState> {
         self.state_tx.subscribe()
+    }
+
+    /// Request graceful shutdown of the connection loop.
+    pub fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Returns a clone of the cancellation token for internal lifecycle owners.
+    #[must_use]
+    pub(crate) fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 }
