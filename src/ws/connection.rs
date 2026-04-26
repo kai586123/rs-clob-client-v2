@@ -27,9 +27,6 @@ use crate::{Result, error::Error};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Outgoing subscription/control messages buffered while the connection task is busy.
-const OUTGOING_CAPACITY: usize = 64;
-
 /// Connection state tracking.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +95,7 @@ where
     /// Watch channel receiver for state changes (for use in checking the current state)
     state_rx: watch::Receiver<ConnectionState>,
     /// Sender channel for outgoing messages
-    sender_tx: mpsc::Sender<String>,
+    sender_tx: mpsc::UnboundedSender<String>,
     /// Broadcast sender for incoming messages
     broadcast_tx: broadcast::Sender<M>,
     /// Cancellation token for graceful shutdown.
@@ -118,7 +115,7 @@ where
     /// The connection loop runs in a background task and automatically
     /// handles reconnection according to the config's `ReconnectConfig`.
     pub fn new(endpoint: String, config: Config, parser: P) -> Result<Self> {
-        let (sender_tx, sender_rx) = mpsc::channel(OUTGOING_CAPACITY);
+        let (sender_tx, sender_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity.max(1));
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
         let cancel = CancellationToken::new();
@@ -157,7 +154,7 @@ where
     async fn connection_loop(
         endpoint: String,
         config: Config,
-        mut sender_rx: mpsc::Receiver<String>,
+        mut sender_rx: mpsc::UnboundedReceiver<String>,
         broadcast_tx: broadcast::Sender<M>,
         parser: P,
         state_tx: watch::Sender<ConnectionState>,
@@ -262,7 +259,7 @@ where
     /// Handle an active WebSocket connection.
     async fn handle_connection(
         ws_stream: WsStream,
-        sender_rx: &mut mpsc::Receiver<String>,
+        sender_rx: &mut mpsc::UnboundedReceiver<String>,
         broadcast_tx: &broadcast::Sender<M>,
         state_rx: watch::Receiver<ConnectionState>,
         config: Config,
@@ -426,7 +423,7 @@ where
     pub fn send<R: Serialize>(&self, request: &R) -> Result<()> {
         let json = serde_json::to_string(request)?;
         self.sender_tx
-            .try_send(json)
+            .send(json)
             .map_err(|_e| WsError::ConnectionClosed)?;
         Ok(())
     }
@@ -439,7 +436,7 @@ where
     ) -> Result<()> {
         let json = request.as_authenticated(credentials)?;
         self.sender_tx
-            .try_send(json)
+            .send(json)
             .map_err(|_e| WsError::ConnectionClosed)?;
         Ok(())
     }
