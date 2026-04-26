@@ -68,7 +68,6 @@ struct ClientInner<S: State> {
     subscriptions: Arc<SubscriptionManager>,
     /// Owns the reconnection handler task and aborts it on drop to release the strong
     /// `Arc<SubscriptionManager>` clone held by that task.
-    #[expect(dead_code, reason = "Field held for its Drop side effect")]
     reconnect_handle: AbortOnDrop,
 }
 

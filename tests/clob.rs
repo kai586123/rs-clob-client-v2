@@ -1615,7 +1615,9 @@ mod authenticated {
         assert_eq!(signed_order.owner.to_string(), API_KEY.to_string());
         assert_eq!(signed_order.order_type, OrderType::GTC);
         mock.assert();
-        mock2.assert_calls(2);
+        // Proxy authentication derives the API key directly, so only one L1 auth
+        // timestamp is needed. Order timestamps are local millisecond timestamps.
+        mock2.assert_calls(1);
 
         Ok(())
     }

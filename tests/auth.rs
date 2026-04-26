@@ -88,7 +88,7 @@ async fn authenticate_with_proxy_signature_should_skip_create_api_key() -> anyho
         .await?;
 
     assert_eq!(signer.address(), client.address());
-    create_mock.assert_hits(0);
+    create_mock.assert_calls(0);
     derive_mock.assert();
 
     Ok(())
