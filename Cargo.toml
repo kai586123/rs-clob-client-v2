@@ -1,7 +1,7 @@
 [package]
 name = "polymarket_client_sdk_v2"
 description = "Polymarket CLOB (Central Limit Order Book) API client SDK"
-version = "0.5.1"
+version = "0.6.0-canary.1"
 authors = [
     "Polymarket Engineering <engineering@polymarket.com>",
     "Chaz Byrnes <chaz@polymarket.com>",
@@ -203,6 +203,11 @@ required-features = ["clob"]
 [[example]]
 name = "gtc_limit_buy"
 path = "examples/clob/orders/gtc_limit_buy.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "gtc_limit_buy_deposit_wallet"
+path = "examples/clob/orders/gtc_limit_buy_deposit_wallet.rs"
 required-features = ["clob"]
 
 [[example]]
